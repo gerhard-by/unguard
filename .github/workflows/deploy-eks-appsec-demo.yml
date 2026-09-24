@@ -1,0 +1,309 @@
+name: Deploy to EKS (appsec-demo)
+
+# Deploys Unguard to the appsec-demo namespace on the perform26 cluster.
+#
+# Unlike deploy-eks.yml, this workflow authenticates as a namespace-scoped
+# identity: GHActions-Unguard-Deploy can describe only the perform26 cluster,
+# and inside it can act only within appsec-demo. It holds no cluster-admin.
+#
+# Consequences of that scoping, versus deploy-eks.yml:
+#   - no "register access entry" step -- the EKS access entry is created once,
+#     out of band, and grants group membership rather than cluster-admin
+#   - no AWS Load Balancer Controller install -- that lives in kube-system,
+#     which this role cannot touch; it is a cluster-level prerequisite
+#   - no --create-namespace -- namespaces are cluster-scoped
+
+on:
+  workflow_dispatch:
+    inputs:
+      chart_version:
+        description: 'Helm chart version to deploy (e.g. 0.23.0-cc934f4)'
+        required: true
+        default: '0.23.0-cc934f4'
+      variant:
+        description: 'Which build to deploy: the chart as published, or with the PR #755 jackson-databind fix'
+        required: false
+        type: choice
+        options:
+          - fixed
+          - vulnerable
+        default: fixed
+      redeploy_mariadb:
+        description: 'Force a MariaDB reinstall. Recreates the StatefulSet, which drops the demo database (persistence is disabled).'
+        required: false
+        type: boolean
+        default: false
+      role_arn:
+        description: 'IAM role assumed via OIDC. Not a secret -- an OIDC role is secured by its trust policy, which pins it to this repo.'
+        required: false
+        default: 'arn:aws:iam::124381674733:role/GHActions-Unguard-Deploy'
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+env:
+  CLUSTER_NAME: perform26
+  AWS_REGION: us-east-1
+  K8S_NAMESPACE: appsec-demo
+  # Images built from PR #755, which pins jackson-databind to 2.18.8 in the
+  # only two services that carry the vulnerability. Cluster nodes pull these
+  # with their own instance profile -- the deploy role needs no ECR access.
+  ECR_REGISTRY: 124381674733.dkr.ecr.us-east-1.amazonaws.com
+  FIX_TAG: pr-755
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Without this the default is six hours. The MariaDB step has already hung
+    # to its own timeout once (run 34979231548), so cap the job too.
+    timeout-minutes: 30
+    steps:
+      # workflow_dispatch inputs are controlled by whoever triggers the run, so
+      # they are untrusted. Every use below passes them through `env:` rather
+      # than `${{ }}` inside a run block -- the latter is substituted textually
+      # before bash sees it, which makes it a shell injection vector. This step
+      # constrains the value as well, so a malformed version fails here rather
+      # than reaching Helm.
+      - name: Validate inputs
+        env:
+          CHART_VERSION: ${{ inputs.chart_version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CHART_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+            echo "::error::chart_version must match ^[A-Za-z0-9][A-Za-z0-9._+-]*$" >&2
+            exit 1
+          fi
+          echo "chart_version OK: $CHART_VERSION"
+
+      - name: Configure AWS credentials
+        # Pinned to an immutable SHA rather than a mutable version tag: whoever
+        # controls the action could otherwise repoint the tag, and this step
+        # runs with an OIDC token in scope.
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ inputs.role_arn }}
+          role-session-name: GitHubActionsAppsecDemoDeploy
+
+      - name: Update kubeconfig
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Log in to GHCR
+        # The unguard chart package is public, so the deploy below succeeds
+        # anonymously. A login is only needed if that package is ever made
+        # private, so a failure here must not fail the run -- otherwise an
+        # expired GHCR_PAT blocks a deploy that never required it.
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          TOKEN="${GHCR_PAT:-$GITHUB_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "No GHCR credential available; continuing anonymously."
+            exit 0
+          fi
+          if echo "$TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin; then
+            echo "Authenticated to ghcr.io as $ACTOR"
+          else
+            echo "::warning::GHCR login failed; continuing anonymously. Rotate GHCR_PAT if the chart package is private."
+            helm registry logout ghcr.io 2>/dev/null || true
+          fi
+
+      - name: Resolve chart namespace
+        id: chart
+        env:
+          GHCR_NAMESPACE: ${{ secrets.GHCR_NAMESPACE }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NS="${GHCR_NAMESPACE:-$REPO}"
+          NS=$(echo "$NS" | tr '[:upper:]' '[:lower:]')
+          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
+
+      - name: Install MariaDB (prerequisite)
+        env:
+          REDEPLOY_MARIADB: ${{ inputs.redeploy_mariadb }}
+        run: |
+          set -euo pipefail
+          # MariaDB is a one-time prerequisite installed outside the chart, not
+          # part of the app deploy. Reinstalling it on every run cost 58-320s of
+          # a ~130s job, and timed the whole deploy out in run 34979231548. The
+          # StatefulSet delete below also drops the demo database, since
+          # persistence is disabled. Skip it when MariaDB is already serving.
+          #
+          # Safe to skip: nothing needs a fresh database. user-auth-service and
+          # membership-service create their schema with CREATE TABLE IF NOT
+          # EXISTS and seed idempotently, like-service runs migrate:fresh on
+          # every pod start, and status-service creates nothing. The chart's
+          # wait-for-mariadb init container only probes port 3306.
+          # Probe with a single GET rather than `kubectl rollout status`. That
+          # command opens a watch and honours --timeout, so runner latency or a
+          # momentary re-rollout makes it exit non-zero even while MariaDB is
+          # serving -- which is how the first run with this guard (34991313391)
+          # reinstalled a StatefulSet that had been ready for 58 minutes.
+          READY=$(kubectl get statefulset unguard-mariadb -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+          # Absent statefulset yields "", and any non-numeric reply means unknown.
+          case "$READY" in ''|*[!0-9]*) READY=0 ;; esac
+
+          if [ "$REDEPLOY_MARIADB" != "true" ] && [ "$READY" -ge 1 ]; then
+            echo "MariaDB is already running (readyReplicas=$READY); skipping install."
+            echo "Pass redeploy_mariadb=true to force a reinstall."
+            exit 0
+          fi
+
+          # Always state the inputs to the decision. The previous guard sent its
+          # check to /dev/null, so a wrong skip/install left no evidence why.
+          echo "Installing MariaDB (redeploy_mariadb=$REDEPLOY_MARIADB, readyReplicas=$READY)."
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+
+          helm_args=(
+            --namespace "$K8S_NAMESPACE"
+            --set primary.persistence.enabled=false
+            --wait --timeout 5m
+          )
+          # Reuse the existing root password so the app's stored credentials stay
+          # valid. An array, not an unquoted string: a password containing a space
+          # would word-split. The read is guarded so a failure here cannot abort
+          # the step under `set -e` before the emptiness check below.
+          if kubectl get secret unguard-mariadb -n "$K8S_NAMESPACE" &>/dev/null; then
+            EXISTING_PW=$(kubectl get secret unguard-mariadb -n "$K8S_NAMESPACE" \
+              -o jsonpath="{.data.mariadb-root-password}" | base64 -d || true)
+            if [ -n "$EXISTING_PW" ]; then
+              # --set-string, so a numeric-looking password is not coerced to a number.
+              helm_args+=(--set-string "auth.rootPassword=$EXISTING_PW")
+            fi
+          fi
+          # Delete the StatefulSet if it exists so Helm can recreate with updated spec
+          kubectl delete statefulset unguard-mariadb -n "$K8S_NAMESPACE" --ignore-not-found
+          helm upgrade --install unguard-mariadb bitnami/mariadb "${helm_args[@]}"
+
+      - name: Deploy with Helm
+        env:
+          CHART_NAMESPACE: ${{ steps.chart.outputs.namespace }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          # "vulnerable" deploys the chart exactly as published. "fixed" swaps
+          # only the two services PR #755 patched; every other service is byte
+          # identical between the variants.
+          #
+          # These overrides are intentionally NOT combined with --reuse-values:
+          # restating the full desired state each run is what lets a deploy
+          # switch back from fixed to vulnerable by simply omitting them.
+          OVERRIDES=()
+          if [ "$VARIANT" = "fixed" ]; then
+            OVERRIDES=(
+              --set "profileService.deployment.container.image.repository=${ECR_REGISTRY}/unguard-profile-service"
+              --set "profileService.deployment.container.image.tag=${FIX_TAG}"
+              --set "proxyService.deployment.container.image.repository=${ECR_REGISTRY}/unguard-proxy-service"
+              --set "proxyService.deployment.container.image.tag=${FIX_TAG}"
+            )
+          fi
+
+          # Set the NLB annotations at create time so the AWS CCM never
+          # provisions a classic ELB first. These are INERT against the chart
+          # currently deployed: 0.23.0-cc934f4 has no annotations block in its
+          # envoy-proxy Service template -- support was added later, and Helm
+          # accepts unknown values silently. They take effect automatically once
+          # chart_version moves to 0.24.0+. Until then the "Annotate service for
+          # NLB" step below remains the path that actually applies them.
+          OVERRIDES+=(
+            --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=external"
+            --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type=instance"
+            --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing"
+          )
+
+          echo "Deploying variant: ${VARIANT}"
+          helm upgrade --install unguard \
+            "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
+            --version "$CHART_VERSION" \
+            --namespace "$K8S_NAMESPACE" \
+            --set localDev.enabled=false \
+            --set envoyProxy.service.type=LoadBalancer \
+            "${OVERRIDES[@]}" \
+            --force-conflicts \
+            --wait --timeout 10m
+
+      - name: Report deployed images
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          echo "Requested variant: ${VARIANT}"
+          # `|| true`: grep exits 1 when nothing matches, which would abort this
+          # reporting step under `set -e` and mask whatever the deploy actually did.
+          kubectl get deploy -n "$K8S_NAMESPACE" \
+            -o custom-columns='WORKLOAD:.metadata.name,IMAGE:.spec.template.spec.containers[0].image' \
+            | grep -E 'WORKLOAD|profile-service|proxy-service' || true
+
+      - name: Annotate service for NLB
+        # Still the path that actually applies these, since the deployed chart
+        # ignores the equivalent --set flags above. Intentionally unguarded: if
+        # this fails the Service keeps the wrong LB type, which should fail loudly.
+        run: |
+          set -euo pipefail
+          kubectl annotate svc unguard-envoy-proxy -n "$K8S_NAMESPACE" --overwrite \
+            service.beta.kubernetes.io/aws-load-balancer-type=external \
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type=instance \
+            service.beta.kubernetes.io/aws-load-balancer-scheme=internet-facing
+
+      - name: Print app URL
+        run: |
+          set -euo pipefail
+          # envoy-proxy is exposed on 8080, not 80, so the bare hostname is not a
+          # working URL -- the NLB has listeners on 8080 and 8081 only. Read the
+          # port from the service rather than hardcoding it, so a chart change
+          # cannot silently make this wrong again.
+          PORT=$(kubectl get svc unguard-envoy-proxy -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)
+          PORT="${PORT:-8080}"
+
+          echo "Waiting for LoadBalancer hostname..."
+          for i in $(seq 1 18); do
+            # `|| true`: a transient kubectl failure would otherwise abort the
+            # whole retry loop on its first iteration under `set -e`.
+            HOSTNAME=$(kubectl get svc unguard-envoy-proxy -n "$K8S_NAMESPACE" \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$HOSTNAME" ]; then
+              # Plain HTTP is correct here: the NLB terminates no TLS and no cert
+              # can be issued for an *.elb.amazonaws.com name.
+              URL="http://${HOSTNAME}:${PORT}"
+              echo "App URL: $URL"
+              # Default guards against `set -u` when run outside Actions.
+              echo "### App URL: $URL" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              exit 0
+            fi
+            echo "  waiting... ($i/18)"
+            sleep 10
+          done
+          # Previously this printed a notice and passed, so a deploy with no
+          # reachable URL still reported success.
+          echo "::error::LoadBalancer hostname was not assigned within 3 minutes."
+          kubectl describe svc unguard-envoy-proxy -n "$K8S_NAMESPACE" || true
+          exit 1
+
+      - name: Show pod status
+        if: always()
+        # Diagnostics only. Every command is `|| true`: this runs on failure, so
+        # it must never abort partway and hide the output that explains why.
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n "$K8S_NAMESPACE" -o wide || true
+          echo ""
+          echo "=== Recent namespace events ==="
+          kubectl get events -n "$K8S_NAMESPACE" --sort-by=.lastTimestamp \
+            --field-selector type!=Normal | tail -30 || true
