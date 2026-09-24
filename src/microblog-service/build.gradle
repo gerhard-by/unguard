@@ -47,7 +47,7 @@ dependencies {
 	implementation group: 'commons-io', name: 'commons-io', version: '2.8.0'
 
 	implementation 'org.springframework.boot:spring-boot-starter-web'
-	implementation 'org.apache.tomcat.embed:tomcat-embed-core:9.0.118'
+	implementation 'org.apache.tomcat.embed:tomcat-embed-core:9.0.121'
 
 	implementation 'org.testng:testng:6.14.3'
 	testImplementation('org.springframework.boot:spring-boot-starter-test') {
