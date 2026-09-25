@@ -1,14 +1,37 @@
 name: Publish images
+
+# Images go to ECR in the account that hosts the EKS cluster, under the
+# appsec-demo/ namespace. Cluster nodes pull them with their own instance
+# profile, so nothing has to be public and no pull secret is needed.
+#
+# The namespace is not cosmetic: this registry is shared by three clusters
+# (ground-zero, perform26, unguard) and already holds two other image sets --
+# the canonical unguard-* repos and another team's unguard-asai-*. The IAM
+# role backing this workflow can only write under appsec-demo/, so a mistake
+# here cannot overwrite either of them.
+#
+# The Helm chart still goes to GHCR, not ECR: it is pulled by the deploy
+# workflow's runner rather than by cluster nodes, and deploy-eks-appsec-demo.yml
+# already references it there.
 on:
-  push:
-    branches:
-      - main
-      - 'release/**'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC token for assuming the AWS role
+  contents: read
+  packages: write   # pushing the Helm chart to GHCR
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE_ARN: arn:aws:iam::124381674733:role/GHActions-Unguard-Deploy
+  # Skaffold appends each artifact name, giving appsec-demo/unguard-frontend etc.
+  IMAGE_NAMESPACE: appsec-demo
 
 jobs:
   build:
     name: Publish on container registry
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -38,12 +61,26 @@ jobs:
         run: |
           echo "IMAGE_TAG=${{ steps.release-version.outputs.group1 }}" >> $GITHUB_ENV
 
-      - name: Log in to the Container registry
-        uses: docker/login-action@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: GitHubActionsPublishImages
+
+      - name: Log in to Amazon ECR
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "${{ vars.REGISTRY }}"
+
+      - name: Log in to GHCR for the Helm chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Separate from the ECR login above: images go to ECR, the chart to GHCR.
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Cache layers
         uses: actions/cache@v3
@@ -60,9 +97,40 @@ jobs:
           command: build
           skip-tests: true
           tag: ${{ env.IMAGE_TAG }}
-          repository: ${{ vars.REGISTRY }}/${{ github.repository }}
+          repository: ${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
           push: true
 
+      # Both the repository and the tag have to be rewritten. Previously only
+      # tags were, which was fine while the chart defaults already pointed at
+      # the registry being published to -- it is not, now that images go to ECR.
+      - name: Update helm image repositories
+        uses: fjogeleit/yaml-update-action@main
+        with:
+          valueFile: 'chart/values.yaml'
+          commitChange: false
+          changes: |
+            {
+              "userSimulator.cronJob.jobTemplate.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-user-simulator",
+              "maliciousLoadGenerator.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-malicious-load-generator",
+              "likeService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-like-service",
+              "paymentService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-payment-service",
+              "profileService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-profile-service",
+              "membershipService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-membership-service",
+              "userAuthService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-user-auth-service",
+              "adService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-ad-service",
+              "envoyProxy.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-envoy-proxy",
+              "microblogService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-microblog-service",
+              "statusService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-status-service",
+              "proxyService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-proxy-service",
+              "frontend.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-frontend",
+              "ragService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-rag-service",
+              "ollama.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-ollama",
+              "feedbackIngestionService.deployment.container.image.repository": "${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-feedback-ingestion-service"
+            }
+
+      # ragService, ollama and feedbackIngestionService were missing from this
+      # list, so their tags were left at whatever values.yaml carried while
+      # every other service was updated.
       - name: Update helm image tags
         uses: fjogeleit/yaml-update-action@main
         with:
@@ -82,7 +150,10 @@ jobs:
               "microblogService.deployment.container.image.tag": "${{ env.IMAGE_TAG }}",
               "statusService.deployment.container.image.tag": "${{ env.IMAGE_TAG }}",
               "proxyService.deployment.container.image.tag": "${{ env.IMAGE_TAG }}",
-              "frontend.deployment.container.image.tag": "${{ env.IMAGE_TAG }}"
+              "frontend.deployment.container.image.tag": "${{ env.IMAGE_TAG }}",
+              "ragService.deployment.container.image.tag": "${{ env.IMAGE_TAG }}",
+              "ollama.image.tag": "${{ env.IMAGE_TAG }}",
+              "feedbackIngestionService.deployment.container.image.tag": "${{ env.IMAGE_TAG }}"
             }
 
       - name: Update helm chart appVersion / version
@@ -98,5 +169,34 @@ jobs:
 
       - name: Publish Helm chart to GHCR
         run: |
+          set -euo pipefail
+          # Explicitly ghcr.io -- vars.REGISTRY now points at ECR, which is for
+          # images only.
+          #
+          # No /chart suffix: `helm push` appends the chart name itself, so this
+          # lands at ghcr.io/<owner>/<repo>/unguard -- exactly what
+          # deploy-eks-appsec-demo.yml resolves when it builds
+          # oci://ghcr.io/<namespace>/unguard. Pushing to .../chart would put it
+          # one segment deeper, where the deploy workflow cannot find it.
           helm package chart
-          helm push unguard-${{ env.IMAGE_TAG }}.tgz oci://${{ vars.REGISTRY }}/${{ github.repository }}/chart
+          helm push "unguard-${{ env.IMAGE_TAG }}.tgz" "oci://ghcr.io/${{ github.repository }}"
+
+      - name: Summarise what was published
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published"
+            echo ""
+            echo "- images: \`${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-*:${{ env.IMAGE_TAG }}\`"
+            echo "- chart:  \`oci://ghcr.io/${{ github.repository }}/unguard:${{ env.IMAGE_TAG }}\`"
+            echo ""
+            echo "Deploy with:"
+            echo '```'
+            echo "gh workflow run deploy-eks-appsec-demo.yml -f chart_version=${{ env.IMAGE_TAG }}"
+            echo '```'
+            echo ""
+            echo "> Note: the deploy workflow reads the GHCR_NAMESPACE secret and"
+            echo "> falls back to this repository. It is currently set to another"
+            echo "> org, so clear it to deploy the chart published above."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
