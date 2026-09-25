@@ -172,8 +172,14 @@ jobs:
           set -euo pipefail
           # Explicitly ghcr.io -- vars.REGISTRY now points at ECR, which is for
           # images only.
+          #
+          # No /chart suffix: `helm push` appends the chart name itself, so this
+          # lands at ghcr.io/<owner>/<repo>/unguard -- exactly what
+          # deploy-eks-appsec-demo.yml resolves when it builds
+          # oci://ghcr.io/<namespace>/unguard. Pushing to .../chart would put it
+          # one segment deeper, where the deploy workflow cannot find it.
           helm package chart
-          helm push "unguard-${{ env.IMAGE_TAG }}.tgz" "oci://ghcr.io/${{ github.repository }}/chart"
+          helm push "unguard-${{ env.IMAGE_TAG }}.tgz" "oci://ghcr.io/${{ github.repository }}"
 
       - name: Summarise what was published
         if: always()
@@ -183,10 +189,14 @@ jobs:
             echo "### Published"
             echo ""
             echo "- images: \`${{ vars.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/unguard-*:${{ env.IMAGE_TAG }}\`"
-            echo "- chart:  \`oci://ghcr.io/${{ github.repository }}/chart:${{ env.IMAGE_TAG }}\`"
+            echo "- chart:  \`oci://ghcr.io/${{ github.repository }}/unguard:${{ env.IMAGE_TAG }}\`"
             echo ""
             echo "Deploy with:"
             echo '```'
             echo "gh workflow run deploy-eks-appsec-demo.yml -f chart_version=${{ env.IMAGE_TAG }}"
             echo '```'
+            echo ""
+            echo "> Note: the deploy workflow reads the GHCR_NAMESPACE secret and"
+            echo "> falls back to this repository. It is currently set to another"
+            echo "> org, so clear it to deploy the chart published above."
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
