@@ -62,6 +62,7 @@ maliciousLoadGenerator:
         FRONTEND_ADDR: unguard-envoy-proxy:8080/ui
         USERS: 1
         WAIT_TIME: 1800
+        PROFILE_SERVICE_ADDR: http://unguard-profile-service:80
 
 # Profile Service
 profileService:

@@ -103,4 +103,19 @@ public class DatabaseManager {
 
         return result;
     }
+
+    public int countBios() {
+        try (Connection connection = getConnection()) {
+            if (connection != null) {
+                ResultSet rs = connection.createStatement().executeQuery("SELECT COUNT(*) FROM bio;");
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (SQLException e) {
+            logger.error("Error in countBios: ", e);
+        }
+
+        return 0;
+    }
 }

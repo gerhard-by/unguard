@@ -19,6 +19,7 @@ import random
 import time
 
 from locust import HttpUser, between, task
+from requests.auth import HTTPDigestAuth
 
 LOCATION_BASED_IPS = ['177.236.37.155',
                       '49.210.236.225',
@@ -121,6 +122,15 @@ SQL_CMDS_LOGIN_USERNAME = [
 
 WAIT_TIME = int(os.environ['WAIT_TIME'])
 
+# profile-service is reached directly (not via the frontend) because the
+# /admin endpoint is protected by Tomcat container-managed DIGEST auth.
+PROFILE_SERVICE_ADDR = os.environ.get('PROFILE_SERVICE_ADDR', 'http://unguard-profile-service:80')
+
+# default credentials of the profile-service in-memory admin realm
+ADMIN_DIGEST_AUTH = HTTPDigestAuth(
+    os.environ.get('ADMIN_USERNAME', 'admin'),
+    os.environ.get('ADMIN_PASSWORD', 'unguard-admin'))
+
 class UnguardUser(HttpUser):
     wait_time = between(WAIT_TIME, WAIT_TIME + 20)
 
@@ -146,6 +156,17 @@ class UnguardUser(HttpUser):
         self.get_sql_golang()
         self.post_sql_login_injection_nodejs()
         self.post_sql_php()
+        self.get_admin_stats_digest()
+
+    def get_admin_stats_digest(self):
+        # Authenticates against profile-service /admin/* using DIGEST auth.
+        # This drives Tomcat's RealmBase#getDigest, the vulnerable function
+        # of CVE-2026-43512, so runtime analytics observes it being executed.
+        self.client.get(f"{PROFILE_SERVICE_ADDR}/admin/stats",
+                        auth=ADMIN_DIGEST_AUTH,
+                        headers=self.get_random_x_forwarded_for_header(),
+                        name="/admin/stats")
+        time.sleep(1)
 
     def post_jndi(self):
         jndi_post = {'language': "en-US",
