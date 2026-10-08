@@ -252,6 +252,11 @@ jobs:
           # ragService.enabled also renders feedback-ingestion-service (one of
           # the four PR #8 patched) and ollama, and tells microblog-service to
           # call them.
+          #
+          # profile-service's liveness probe defaults to a 20s initial delay.
+          # When a deploy restarts every pod at once, its startup (two Java
+          # agents plus Hibernate) took 75s+, so the probe killed it into
+          # CrashLoopBackOff (run 37796866372). Alone it starts in ~20s.
           echo "Deploying variant: ${VARIANT}"
           helm upgrade --install unguard \
             "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
@@ -260,6 +265,7 @@ jobs:
             --set localDev.enabled=false \
             --set envoyProxy.service.type=LoadBalancer \
             --set ragService.enabled=true \
+            --set profileService.deployment.container.livenessProbe.initialDelaySeconds=120 \
             "${OVERRIDES[@]}" \
             --force-conflicts \
             --wait --timeout 10m
