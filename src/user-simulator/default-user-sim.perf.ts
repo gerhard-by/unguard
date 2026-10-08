@@ -1,5 +1,8 @@
 'use strict'
+import crypto from 'crypto'
 import fs from 'fs'
+import http from 'http'
+
 import { Bio, BioList, Config, ImageUrlPost, TextPost, UrlPost, User } from './types'
 import puppeteer, { Page } from 'puppeteer'
 
@@ -97,6 +100,99 @@ function delay(time: number) {
 	})
 }
 
+function md5(input: string): string {
+	return crypto.createHash('md5').update(input).digest('hex')
+}
+
+function parseDigestChallenge(header: string): Record<string, string> {
+	const result: Record<string, string> = {}
+	const params = header.replace(/^Digest\s+/i, '')
+	const regex = /(\w+)=(?:"([^"]*)"|([^,]*))/g
+	let match
+	while ((match = regex.exec(params)) !== null) {
+		result[match[1]] = match[2] !== undefined ? match[2] : match[3]
+	}
+	return result
+}
+
+function httpGet(
+	options: http.RequestOptions
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+	return new Promise((resolve, reject) => {
+		const req = http.request(options, (res) => {
+			let body = ''
+			res.on('data', (chunk) => (body += chunk))
+			res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }))
+		})
+		req.on('error', reject)
+		req.end()
+	})
+}
+
+/**
+ * Authenticates to profile-service /admin with HTTP DIGEST. This drives
+ * Tomcat's RealmBase#getDigest, the vulnerable function of CVE-2026-43512,
+ * so it is observed executing in a live process. It is benign admin traffic,
+ * deliberately independent of the frontend login flow so it runs every time.
+ */
+async function exerciseProfileAdminDigest(
+	baseUrl: string,
+	requestPath: string,
+	username: string,
+	password: string,
+	clientIp: string
+) {
+	const url = new URL(baseUrl)
+	const host = url.hostname
+	const port = url.port ? parseInt(url.port, 10) : 80
+	const method = 'GET'
+	const commonHeaders = { 'X-Client-Ip': clientIp, 'User-Agent': 'simulated-browser-user' }
+
+	const challenge = await httpGet({ host, port, path: requestPath, method, headers: commonHeaders })
+	if (challenge.status !== 401) {
+		console.log(`Profile admin: expected 401 challenge, got ${challenge.status}`)
+		return
+	}
+
+	const wwwAuth = challenge.headers['www-authenticate']
+	const authValue = Array.isArray(wwwAuth) ? wwwAuth[0] : wwwAuth
+	if (!authValue || !/digest/i.test(authValue)) {
+		console.log('Profile admin: no digest challenge received')
+		return
+	}
+
+	const challengeParams = parseDigestChallenge(authValue)
+	const { realm, nonce, qop, opaque } = challengeParams
+	const ha1 = md5(`${username}:${realm}:${password}`)
+	const ha2 = md5(`${method}:${requestPath}`)
+	const nc = '00000001'
+	const cnonce = crypto.randomBytes(8).toString('hex')
+
+	let response: string
+	let authHeader: string
+	if (qop) {
+		response = md5(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
+		authHeader =
+			`Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${requestPath}", ` +
+			`qop=${qop}, nc=${nc}, cnonce="${cnonce}", response="${response}"`
+	} else {
+		response = md5(`${ha1}:${nonce}:${ha2}`)
+		authHeader = `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${requestPath}", response="${response}"`
+	}
+	if (opaque) {
+		authHeader += `, opaque="${opaque}"`
+	}
+
+	const authed = await httpGet({
+		host,
+		port,
+		path: requestPath,
+		method,
+		headers: { ...commonHeaders, Authorization: authHeader },
+	})
+	console.log(`Profile admin DIGEST ${requestPath}: HTTP ${authed.status} ${authed.body}`)
+}
+
 const textPosts: TextPost[] = JSON.parse(fs.readFileSync('./data/textposts.json', 'utf-8')).posts
 const imgPosts: ImageUrlPost[] = JSON.parse(fs.readFileSync('./data/imgposts.json', 'utf-8')).posts
 const urlPosts: UrlPost[] = JSON.parse(fs.readFileSync('./data/urlposts.json', 'utf-8')).posts
@@ -114,6 +210,17 @@ const bioList: Bio[] = (JSON.parse(fs.readFileSync('./data/biolist.json', 'utf-8
 	const config: Config = { frontendUrl: 'http://' + process.env.FRONTEND_ADDR }
 	const username = 'ROBOT_' + getRandomInt(50000).toString(16)
 	const user: User = { username: username, password: username }
+
+	// Benign admin check, run before (and independent of) the frontend login
+	// flow so it executes on every invocation even if the frontend is down.
+	const profileServiceAddr = process.env.PROFILE_SERVICE_ADDR ?? 'http://unguard-profile-service:80'
+	const adminUser = process.env.ADMIN_USERNAME ?? 'admin'
+	const adminPass = process.env.ADMIN_PASSWORD ?? 'unguard-admin'
+	try {
+		await exerciseProfileAdminDigest(profileServiceAddr, '/admin/stats', adminUser, adminPass, ip)
+	} catch (e: any) {
+		console.error('Profile admin digest check failed:', e.message)
+	}
 
 	try {
 		await registerOrLogin(page, config, user)

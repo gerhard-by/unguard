@@ -49,8 +49,6 @@ spec:
               value: {{ quote .Values.maliciousLoadGenerator.deployment.container.env.USERS }}
             - name: WAIT_TIME
               value: {{ quote .Values.maliciousLoadGenerator.deployment.container.env.WAIT_TIME }}
-            - name: PROFILE_SERVICE_ADDR
-              value: {{ quote .Values.maliciousLoadGenerator.deployment.container.env.PROFILE_SERVICE_ADDR }}
       initContainers:
         - name: wait-for-frontend
           image: curlimages/curl
