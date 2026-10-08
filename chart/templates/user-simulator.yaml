@@ -44,6 +44,8 @@ spec:
                   value: {{ quote .Values.userSimulator.cronJob.jobTemplate.container.env.FRONTEND_ADDR }}
                 - name: SIMULATE_PRIVATE_RANGES
                   value: {{ quote .Values.userSimulator.cronJob.jobTemplate.container.env.SIMULATE_PRIVATE_RANGES }}
+                - name: PROFILE_SERVICE_ADDR
+                  value: {{ quote .Values.userSimulator.cronJob.jobTemplate.container.env.PROFILE_SERVICE_ADDR }}
               resources:
                 requests:
                   cpu: {{ quote .Values.userSimulator.cronJob.jobTemplate.container.resources.requests.cpu }}
