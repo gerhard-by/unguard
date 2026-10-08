@@ -21,13 +21,17 @@ on:
         required: true
         default: '0.23.0-cc934f4'
       variant:
-        description: 'Which build to deploy: the chart as published, or with the PR #755 jackson-databind fix'
+        description: 'Which build to deploy: the chart as published, or with the PR #8 Tomcat fix (CVE-2026-43512)'
         required: false
         type: choice
         options:
           - fixed
           - vulnerable
         default: fixed
+      fix_tag:
+        description: 'Image tag of the fixed build, from a "Publish images" run on the PR #8 fix. Required when variant is fixed.'
+        required: false
+        default: ''
       redeploy_mariadb:
         description: 'Force a MariaDB reinstall. Recreates the StatefulSet, which drops the demo database (persistence is disabled).'
         required: false
@@ -47,11 +51,12 @@ env:
   CLUSTER_NAME: perform26
   AWS_REGION: us-east-1
   K8S_NAMESPACE: appsec-demo
-  # Images built from PR #755, which pins jackson-databind to 2.18.8 in the
-  # only two services that carry the vulnerability. Cluster nodes pull these
-  # with their own instance profile -- the deploy role needs no ECR access.
+  # Fixed images are built from PR #8, which pins embedded Tomcat to 9.0.118 /
+  # 11.0.22 in the four Spring services, and published by release.yaml under
+  # the appsec-demo/ namespace. Cluster nodes pull these with their own
+  # instance profile -- the deploy role needs no ECR access.
   ECR_REGISTRY: 124381674733.dkr.ecr.us-east-1.amazonaws.com
-  FIX_TAG: pr-755
+  IMAGE_NAMESPACE: appsec-demo
 
 jobs:
   deploy:
@@ -69,6 +74,8 @@ jobs:
       - name: Validate inputs
         env:
           CHART_VERSION: ${{ inputs.chart_version }}
+          VARIANT: ${{ inputs.variant }}
+          FIX_TAG: ${{ inputs.fix_tag }}
         run: |
           set -euo pipefail
           if ! [[ "$CHART_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
@@ -76,6 +83,15 @@ jobs:
             exit 1
           fi
           echo "chart_version OK: $CHART_VERSION"
+          # fix_tag lands in an image reference, so constrain it the same way.
+          # Only checked for "fixed": "vulnerable" never reads it.
+          if [ "$VARIANT" = "fixed" ]; then
+            if ! [[ "$FIX_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::variant=fixed needs fix_tag matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (got '${FIX_TAG}')" >&2
+              exit 1
+            fi
+            echo "fix_tag OK: $FIX_TAG"
+          fi
 
       - name: Configure AWS credentials
         # Pinned to an immutable SHA rather than a mutable version tag: whoever
@@ -195,10 +211,11 @@ jobs:
           CHART_NAMESPACE: ${{ steps.chart.outputs.namespace }}
           CHART_VERSION: ${{ inputs.chart_version }}
           VARIANT: ${{ inputs.variant }}
+          FIX_TAG: ${{ inputs.fix_tag }}
         run: |
           set -euo pipefail
           # "vulnerable" deploys the chart exactly as published. "fixed" swaps
-          # only the two services PR #755 patched; every other service is byte
+          # only the four services PR #8 patched; every other service is byte
           # identical between the variants.
           #
           # These overrides are intentionally NOT combined with --reuse-values:
@@ -206,12 +223,17 @@ jobs:
           # switch back from fixed to vulnerable by simply omitting them.
           OVERRIDES=()
           if [ "$VARIANT" = "fixed" ]; then
-            OVERRIDES=(
-              --set "profileService.deployment.container.image.repository=${ECR_REGISTRY}/unguard-profile-service"
-              --set "profileService.deployment.container.image.tag=${FIX_TAG}"
-              --set "proxyService.deployment.container.image.repository=${ECR_REGISTRY}/unguard-proxy-service"
-              --set "proxyService.deployment.container.image.tag=${FIX_TAG}"
-            )
+            REPO_PREFIX="${ECR_REGISTRY}/${IMAGE_NAMESPACE}"
+            for svc in profileService:profile-service proxyService:proxy-service \
+                       microblogService:microblog-service \
+                       feedbackIngestionService:feedback-ingestion-service; do
+              key="${svc%%:*}"
+              image="unguard-${svc#*:}"
+              OVERRIDES+=(
+                --set "${key}.deployment.container.image.repository=${REPO_PREFIX}/${image}"
+                --set "${key}.deployment.container.image.tag=${FIX_TAG}"
+              )
+            done
           fi
 
           # Set the NLB annotations at create time so the AWS CCM never
@@ -227,6 +249,9 @@ jobs:
             --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing"
           )
 
+          # ragService.enabled also renders feedback-ingestion-service (one of
+          # the four PR #8 patched) and ollama, and tells microblog-service to
+          # call them.
           echo "Deploying variant: ${VARIANT}"
           helm upgrade --install unguard \
             "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
@@ -234,6 +259,7 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             --set localDev.enabled=false \
             --set envoyProxy.service.type=LoadBalancer \
+            --set ragService.enabled=true \
             "${OVERRIDES[@]}" \
             --force-conflicts \
             --wait --timeout 10m
@@ -248,7 +274,7 @@ jobs:
           # reporting step under `set -e` and mask whatever the deploy actually did.
           kubectl get deploy -n "$K8S_NAMESPACE" \
             -o custom-columns='WORKLOAD:.metadata.name,IMAGE:.spec.template.spec.containers[0].image' \
-            | grep -E 'WORKLOAD|profile-service|proxy-service' || true
+            | grep -E 'WORKLOAD|profile-service|proxy-service|microblog-service|feedback-ingestion-service|rag-service|ollama' || true
 
       - name: Annotate service for NLB
         # Still the path that actually applies these, since the deployed chart
