@@ -17,9 +17,9 @@ on:
   workflow_dispatch:
     inputs:
       chart_version:
-        description: 'Helm chart version to deploy (e.g. 0.23.0-cc934f4)'
+        description: 'Helm chart version to deploy. Default is the vulnerable build of main, published by "Publish images" run 37782823536.'
         required: true
-        default: '0.23.0-cc934f4'
+        default: '0.24.0-1791468771'
       variant:
         description: 'Which build to deploy: the chart as published, or with the PR #8 Tomcat fix (CVE-2026-43512)'
         required: false
@@ -29,9 +29,9 @@ on:
           - vulnerable
         default: fixed
       fix_tag:
-        description: 'Image tag of the fixed build, from a "Publish images" run on the PR #8 fix. Required when variant is fixed.'
+        description: 'Image tag of the fixed build. Default is the PR #8 fix, published by "Publish images" run 37795671361. Only used when variant is fixed.'
         required: false
-        default: ''
+        default: '0.24.0-1791471146'
       redeploy_mariadb:
         description: 'Force a MariaDB reinstall. Recreates the StatefulSet, which drops the demo database (persistence is disabled).'
         required: false
