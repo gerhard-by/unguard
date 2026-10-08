@@ -216,9 +216,7 @@ jobs:
           set -euo pipefail
           # "vulnerable" deploys the chart exactly as published. "fixed" swaps
           # only the four services PR #8 patched; every other service is byte
-          # identical between the variants. feedbackIngestionService is only
-          # rendered when ragService.enabled is set, so its override is inert
-          # otherwise.
+          # identical between the variants.
           #
           # These overrides are intentionally NOT combined with --reuse-values:
           # restating the full desired state each run is what lets a deploy
@@ -251,6 +249,9 @@ jobs:
             --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing"
           )
 
+          # ragService.enabled also renders feedback-ingestion-service (one of
+          # the four PR #8 patched) and ollama, and tells microblog-service to
+          # call them.
           echo "Deploying variant: ${VARIANT}"
           helm upgrade --install unguard \
             "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
@@ -258,6 +259,7 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             --set localDev.enabled=false \
             --set envoyProxy.service.type=LoadBalancer \
+            --set ragService.enabled=true \
             "${OVERRIDES[@]}" \
             --force-conflicts \
             --wait --timeout 10m
@@ -272,7 +274,7 @@ jobs:
           # reporting step under `set -e` and mask whatever the deploy actually did.
           kubectl get deploy -n "$K8S_NAMESPACE" \
             -o custom-columns='WORKLOAD:.metadata.name,IMAGE:.spec.template.spec.containers[0].image' \
-            | grep -E 'WORKLOAD|profile-service|proxy-service|microblog-service|feedback-ingestion-service' || true
+            | grep -E 'WORKLOAD|profile-service|proxy-service|microblog-service|feedback-ingestion-service|rag-service|ollama' || true
 
       - name: Annotate service for NLB
         # Still the path that actually applies these, since the deployed chart
