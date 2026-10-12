@@ -253,6 +253,11 @@ jobs:
           # the four PR #8 patched) and ollama, and tells microblog-service to
           # call them.
           #
+          # ollama is disabled: CPU inference on these ~2 vCPU nodes timed out
+          # every chat call, and with no resource limits it starved the other
+          # pods on its node. rag-service stays deployed for AI Observability;
+          # its calls fail fast on the missing unguard-ollama host instead.
+          #
           # profile-service's liveness probe defaults to a 20s initial delay.
           # When a deploy restarts every pod at once, its startup (two Java
           # agents plus Hibernate) took 75s+, so the probe killed it into
@@ -265,6 +270,7 @@ jobs:
             --set localDev.enabled=false \
             --set envoyProxy.service.type=LoadBalancer \
             --set ragService.enabled=true \
+            --set ollama.enabled=false \
             --set profileService.deployment.container.livenessProbe.initialDelaySeconds=120 \
             "${OVERRIDES[@]}" \
             --force-conflicts \
