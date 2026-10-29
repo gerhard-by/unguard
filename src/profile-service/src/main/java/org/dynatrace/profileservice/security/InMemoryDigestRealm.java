@@ -18,9 +18,12 @@ package org.dynatrace.profileservice.security;
 
 import org.apache.catalina.realm.GenericPrincipal;
 import org.apache.catalina.realm.RealmBase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.security.Principal;
 import java.util.Collections;
+import java.util.List;
 
 /**
  * Tomcat realm holding a single admin user in memory.
@@ -44,6 +47,8 @@ import java.util.Collections;
  * getDigest fix, so the fixed/vulnerable image flip alone decides exploitability.
  */
 public class InMemoryDigestRealm extends RealmBase {
+
+    private static final Logger logger = LoggerFactory.getLogger(InMemoryDigestRealm.class);
 
     private final String username;
     private final String password;
@@ -70,6 +75,11 @@ public class InMemoryDigestRealm extends RealmBase {
         // is why the bypass is not reproducible against it. Grant the admin role to
         // whoever authenticated; the known admin keeps its real credentials.
         String credentials = this.username.equals(username) ? password : null;
-        return new GenericPrincipal(username, credentials, Collections.singletonList(role));
+        List<String> roles = Collections.singletonList(role);
+        // Routine audit of every admin principal we hand out. The username is the
+        // one attacker-controlled value visible here; legitimate access always
+        // resolves to the configured admin account.
+        logger.info("Admin access granted: user={} roles={}", username, roles);
+        return new GenericPrincipal(username, credentials, roles);
     }
 }
