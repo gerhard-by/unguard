@@ -24,8 +24,24 @@ import java.util.Collections;
 
 /**
  * Tomcat realm holding a single admin user in memory.
- * DIGEST authentication against this realm goes through RealmBase#getDigest,
- * the vulnerable function of CVE-2026-43512.
+ *
+ * <p>DIGEST authentication against this realm goes through RealmBase#getDigest,
+ * the vulnerable function of CVE-2026-43512. On an unpatched Tomcat, getDigest
+ * does not null-check the result of {@link #getPassword(String)}: for an unknown
+ * user getPassword returns {@code null}, which Java concatenates as the literal
+ * string {@code "null"}, so the server computes {@code A1 = MD5(user:realm:null)}.
+ * An attacker who authenticates as any non-existent user with the literal
+ * password {@code "null"} therefore produces a matching digest. The patched
+ * Tomcat (fixed deploy variant bumps {@code tomcat.version} to 9.0.118) adds the
+ * null guard, so getDigest returns {@code null} and authentication fails.
+ *
+ * <p>This realm is deliberately a <em>vulnerable configuration</em>: {@link
+ * #getPrincipal(String)} trusts a matched digest instead of independently
+ * re-validating that the user exists. A hardened realm (e.g. Tomcat's stock
+ * UserDatabaseRealm) re-checks existence in getPrincipal and so blocks the
+ * bypass even on an unpatched Tomcat; that is why the public PoC could only
+ * reach a matching-digest-then-401 dead end. Here the sole gate is the Tomcat
+ * getDigest fix, so the fixed/vulnerable image flip alone decides exploitability.
  */
 public class InMemoryDigestRealm extends RealmBase {
 
@@ -46,9 +62,14 @@ public class InMemoryDigestRealm extends RealmBase {
 
     @Override
     protected Principal getPrincipal(String username) {
-        if (!this.username.equals(username)) {
-            return null;
-        }
-        return new GenericPrincipal(username, password, Collections.singletonList(role));
+        // VULNERABLE realm configuration: trust whatever digest already matched in
+        // RealmBase#getDigest instead of re-validating that the user exists. On an
+        // unpatched Tomcat this lets the CVE-2026-43512 null-password bypass land --
+        // an unknown user authenticates as admin with the literal password "null".
+        // The stock UserDatabaseRealm returns null here for an unknown user, which
+        // is why the bypass is not reproducible against it. Grant the admin role to
+        // whoever authenticated; the known admin keeps its real credentials.
+        String credentials = this.username.equals(username) ? password : null;
+        return new GenericPrincipal(username, credentials, Collections.singletonList(role));
     }
 }
