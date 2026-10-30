@@ -193,6 +193,89 @@ async function exerciseProfileAdminDigest(
 	console.log(`Profile admin DIGEST ${requestPath}: HTTP ${authed.status} ${authed.body}`)
 }
 
+function httpJson(
+	baseUrl: string,
+	method: string,
+	requestPath: string,
+	clientIp: string,
+	body?: object,
+	jwt?: string
+): Promise<{ status: number; body: string }> {
+	const url = new URL(baseUrl)
+	const payload = body ? JSON.stringify(body) : ''
+	const headers: http.OutgoingHttpHeaders = {
+		'X-Client-Ip': clientIp,
+		'User-Agent': 'simulated-browser-user',
+		'Content-Type': 'application/json',
+		'Content-Length': Buffer.byteLength(payload),
+	}
+	if (jwt) {
+		headers.Cookie = `jwt=${jwt}`
+	}
+	return new Promise((resolve, reject) => {
+		const req = http.request(
+			{
+				host: url.hostname,
+				port: url.port ? parseInt(url.port, 10) : 80,
+				path: url.pathname.replace(/\/$/, '') + requestPath,
+				method,
+				headers,
+			},
+			(res) => {
+				let data = ''
+				res.on('data', (chunk) => (data += chunk))
+				res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+			}
+		)
+		req.on('error', reject)
+		req.end(payload)
+	})
+}
+
+// microblog-service only forwards spam feedback to the feedback-ingestion-service once a
+// post has at least 5 distinct votes that lean clearly one way (see SpamKBIngestionUtils)
+const SPAM_VOTER_COUNT = 5
+const spamPosts = [
+	'Congratulations! You won a free cruise, click here to claim your prize now!!!',
+	'Earn $5000 a week from home, no experience needed, limited spots available',
+	'Cheap watches and designer bags, 90% off, DM me for the secret link',
+]
+
+/**
+ * Has several users agree that a new post is spam. Enough unanimous votes make
+ * microblog-service send the post to the feedback-ingestion-service, which is
+ * otherwise never called. A new post is used each run, since microblog-service
+ * ingests the feedback for a post only once.
+ */
+async function voteOnSpamPost(frontendUrl: string, clientIp: string) {
+	const jwts: string[] = []
+	for (let i = 0; i < SPAM_VOTER_COUNT; i++) {
+		const voter = { username: `SPAM_VOTER_${i}`, password: `SPAM_VOTER_${i}` }
+		// registering fails harmlessly once the voter exists, logging in still works
+		await httpJson(frontendUrl, 'POST', '/api/auth/register', clientIp, voter)
+		const login = await httpJson(frontendUrl, 'POST', '/api/auth/login', clientIp, voter)
+		const jwt = login.status === 200 ? JSON.parse(login.body).jwt : undefined
+		if (!jwt) {
+			console.log(`Spam vote: login of ${voter.username} failed with HTTP ${login.status}`)
+			return
+		}
+		jwts.push(jwt)
+	}
+
+	const content = spamPosts[getRandomInt(spamPosts.length)]
+	const post = await httpJson(frontendUrl, 'POST', '/api/post', clientIp, { content }, jwts[0])
+	if (post.status !== 200) {
+		console.log(`Spam vote: creating the post failed with HTTP ${post.status}`)
+		return
+	}
+	const postId = JSON.parse(post.body)
+
+	for (const jwt of jwts) {
+		await httpJson(frontendUrl, 'POST', `/api/post/${postId}/spam-prediction-user-rating/upvote`, clientIp, {}, jwt)
+	}
+	console.log(`${SPAM_VOTER_COUNT} users voted post ${postId} as spam.`)
+}
+
 const textPosts: TextPost[] = JSON.parse(fs.readFileSync('./data/textposts.json', 'utf-8')).posts
 const imgPosts: ImageUrlPost[] = JSON.parse(fs.readFileSync('./data/imgposts.json', 'utf-8')).posts
 const urlPosts: UrlPost[] = JSON.parse(fs.readFileSync('./data/urlposts.json', 'utf-8')).posts
@@ -220,6 +303,12 @@ const bioList: Bio[] = (JSON.parse(fs.readFileSync('./data/biolist.json', 'utf-8
 		await exerciseProfileAdminDigest(profileServiceAddr, '/admin/stats', adminUser, adminPass, ip)
 	} catch (e: any) {
 		console.error('Profile admin digest check failed:', e.message)
+	}
+
+	try {
+		await voteOnSpamPost(config.frontendUrl, ip)
+	} catch (e: any) {
+		console.error('Spam vote failed:', e.message)
 	}
 
 	try {
