@@ -250,8 +250,13 @@ jobs:
           )
 
           # ragService.enabled also renders feedback-ingestion-service (one of
-          # the four PR #8 patched) and ollama, and tells microblog-service to
-          # call them.
+          # the four PR #8 patched) and tells microblog-service to call it.
+          #
+          # ollama would normally be rendered with it, but it is disabled: it
+          # starved the burstable cluster node it landed on of CPU credits until
+          # the node went NotReady. Without it rag-service's LLM calls fail;
+          # microblog-service classifies spam asynchronously and only logs that,
+          # and the spam feedback path to feedback-ingestion-service still works.
           #
           # profile-service's liveness probe defaults to a 20s initial delay.
           # When a deploy restarts every pod at once, its startup (two Java
@@ -265,6 +270,7 @@ jobs:
             --set localDev.enabled=false \
             --set envoyProxy.service.type=LoadBalancer \
             --set ragService.enabled=true \
+            --set ollama.enabled=false \
             --set profileService.deployment.container.livenessProbe.initialDelaySeconds=120 \
             "${OVERRIDES[@]}" \
             --force-conflicts \
