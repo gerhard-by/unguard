@@ -10,6 +10,8 @@ group = 'org.dynatrace'
 version = '1.0.1'
 sourceCompatibility = '1.8'
 
+ext['tomcat.version'] = '9.0.118'
+
 repositories {
 	mavenCentral()
 }
