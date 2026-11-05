@@ -55,7 +55,7 @@ env:
   # trust policy, which pins it to this repo.
   ROLE_ARN: 'arn:aws:iam::124381674733:role/GHActions-Unguard-Deploy'
   # Defined fix build, used for variant=fixed unless fixed_version_override is set.
-  FIXED_VERSION: '0.24.0-1791471146'
+  FIXED_VERSION: '0.24.0-1793881609'
 
 jobs:
   deploy:
