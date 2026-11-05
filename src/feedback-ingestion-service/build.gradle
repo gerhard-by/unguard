@@ -8,6 +8,7 @@ plugins {
 group = 'org.dynatrace'
 version = '0.0.1-SNAPSHOT'
 description = 'feedback-ingestion-service'
+ext['tomcat.version'] = '11.0.22'
 
 java {
     toolchain {
