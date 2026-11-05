@@ -16,31 +16,25 @@ name: Deploy to EKS (appsec-demo)
 on:
   workflow_dispatch:
     inputs:
-      chart_version:
-        description: 'Helm chart version to deploy. Defaults to the vulnerable main build.'
-        required: true
-        default: '0.24.0-1791468771'
       variant:
-        description: 'Which build to deploy: The vulnerable version (carrying CVE-2026-43512), or the fixed one.'
-        required: false
+        description: 'Which build to deploy: the vulnerable version (carrying CVE-2026-43512, latest main build), or the fixed one.'
+        required: true
         type: choice
         options:
           - fixed
           - vulnerable
         default: fixed
-      fix_tag:
-        description: 'Image tag of the fixed build. Only used when variant is fixed.'
+      vulnerable_version_override:
+        description: 'Optional. Helm chart version to deploy for "vulnerable" instead of the latest published one.'
         required: false
-        default: '0.24.0-1791471146'
+      fixed_version_override:
+        description: 'Optional. Image tag to deploy for "fixed" instead of the defined fix build (see FIXED_VERSION).'
+        required: false
       redeploy_mariadb:
         description: 'Force a MariaDB reinstall. Recreates the StatefulSet, which drops the demo database (persistence is disabled).'
         required: false
         type: boolean
         default: false
-      role_arn:
-        description: 'IAM role assumed via OIDC. Not a secret -- an OIDC role is secured by its trust policy, which pins it to this repo.'
-        required: false
-        default: 'arn:aws:iam::124381674733:role/GHActions-Unguard-Deploy'
 
 permissions:
   id-token: write
@@ -57,6 +51,11 @@ env:
   # instance profile -- the deploy role needs no ECR access.
   ECR_REGISTRY: 124381674733.dkr.ecr.us-east-1.amazonaws.com
   IMAGE_NAMESPACE: appsec-demo
+  # IAM role assumed via OIDC. Not a secret -- an OIDC role is secured by its
+  # trust policy, which pins it to this repo.
+  ROLE_ARN: 'arn:aws:iam::124381674733:role/GHActions-Unguard-Deploy'
+  # Defined fix build, used for variant=fixed unless fixed_version_override is set.
+  FIXED_VERSION: '0.24.0-1793881609'
 
 jobs:
   deploy:
@@ -73,24 +72,24 @@ jobs:
       # than reaching Helm.
       - name: Validate inputs
         env:
-          CHART_VERSION: ${{ inputs.chart_version }}
           VARIANT: ${{ inputs.variant }}
-          FIX_TAG: ${{ inputs.fix_tag }}
+          VULN_OVERRIDE: ${{ inputs.vulnerable_version_override }}
+          FIXED_OVERRIDE: ${{ inputs.fixed_version_override }}
         run: |
           set -euo pipefail
-          if ! [[ "$CHART_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
-            echo "::error::chart_version must match ^[A-Za-z0-9][A-Za-z0-9._+-]*$" >&2
-            exit 1
-          fi
-          echo "chart_version OK: $CHART_VERSION"
-          # fix_tag lands in an image reference, so constrain it the same way.
-          # Only checked for "fixed": "vulnerable" never reads it.
-          if [ "$VARIANT" = "fixed" ]; then
-            if ! [[ "$FIX_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-              echo "::error::variant=fixed needs fix_tag matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (got '${FIX_TAG}')" >&2
+          # Overrides land in a Helm version / image reference, so constrain them.
+          # Only the override relevant to the chosen variant is used.
+          if [ "$VARIANT" = "vulnerable" ] && [ -n "$VULN_OVERRIDE" ]; then
+            if ! [[ "$VULN_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+              echo "::error::vulnerable_version_override must match ^[A-Za-z0-9][A-Za-z0-9._+-]*$" >&2
               exit 1
             fi
-            echo "fix_tag OK: $FIX_TAG"
+          fi
+          if [ "$VARIANT" = "fixed" ] && [ -n "$FIXED_OVERRIDE" ]; then
+            if ! [[ "$FIXED_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "::error::fixed_version_override must match ^[A-Za-z0-9][A-Za-z0-9._-]*$" >&2
+              exit 1
+            fi
           fi
 
       - name: Configure AWS credentials
@@ -100,7 +99,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ inputs.role_arn }}
+          role-to-assume: ${{ env.ROLE_ARN }}
           role-session-name: GitHubActionsAppsecDemoDeploy
 
       - name: Update kubeconfig
@@ -146,6 +145,37 @@ jobs:
           NS="${GHCR_NAMESPACE:-$REPO}"
           NS=$(echo "$NS" | tr '[:upper:]' '[:lower:]')
           echo "namespace=$NS" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve versions
+        id: versions
+        env:
+          CHART_NAMESPACE: ${{ steps.chart.outputs.namespace }}
+          VARIANT: ${{ inputs.variant }}
+          VULN_OVERRIDE: ${{ inputs.vulnerable_version_override }}
+          FIXED_OVERRIDE: ${{ inputs.fixed_version_override }}
+        run: |
+          set -euo pipefail
+          # The chart is always the latest published build (or the vulnerable
+          # override); "fixed" only swaps four service images on top of it.
+          if [ "$VARIANT" = "vulnerable" ] && [ -n "$VULN_OVERRIDE" ]; then
+            CHART_VERSION="$VULN_OVERRIDE"
+          else
+            # List tags from the registry (the chart package is public, so an
+            # anonymous pull token works) and take the highest version.
+            TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:${CHART_NAMESPACE}/unguard:pull" | jq -r .token)
+            CHART_VERSION=$(curl -fsS -H "Authorization: Bearer $TOKEN" \
+              "https://ghcr.io/v2/${CHART_NAMESPACE}/unguard/tags/list?n=1000" \
+              | jq -r '.tags[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' | sort -V | tail -n1)
+          fi
+          [ -n "$CHART_VERSION" ] || { echo "::error::could not resolve a chart version" >&2; exit 1; }
+
+          FIX_TAG="${FIXED_OVERRIDE:-$FIXED_VERSION}"
+
+          echo "chart_version=$CHART_VERSION" >> "$GITHUB_OUTPUT"
+          echo "fix_tag=$FIX_TAG" >> "$GITHUB_OUTPUT"
+          echo "Chart version: $CHART_VERSION"
+          [ "$VARIANT" = "fixed" ] && echo "Fix image tag: $FIX_TAG"
+          exit 0
 
       - name: Install MariaDB (prerequisite)
         env:
@@ -209,9 +239,9 @@ jobs:
       - name: Deploy with Helm
         env:
           CHART_NAMESPACE: ${{ steps.chart.outputs.namespace }}
-          CHART_VERSION: ${{ inputs.chart_version }}
+          CHART_VERSION: ${{ steps.versions.outputs.chart_version }}
           VARIANT: ${{ inputs.variant }}
-          FIX_TAG: ${{ inputs.fix_tag }}
+          FIX_TAG: ${{ steps.versions.outputs.fix_tag }}
         run: |
           set -euo pipefail
           # "vulnerable" deploys the chart exactly as published. "fixed" swaps
@@ -241,7 +271,7 @@ jobs:
           # currently deployed: 0.23.0-cc934f4 has no annotations block in its
           # envoy-proxy Service template -- support was added later, and Helm
           # accepts unknown values silently. They take effect automatically once
-          # chart_version moves to 0.24.0+. Until then the "Annotate service for
+          # the chart is 0.24.0+. Until then the "Annotate service for
           # NLB" step below remains the path that actually applies them.
           OVERRIDES+=(
             --set "envoyProxy.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=external"
