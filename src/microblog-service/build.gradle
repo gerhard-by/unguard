@@ -6,7 +6,7 @@ plugins {
 	id 'java'
 }
 
-ext['tomcat.version'] = '9.0.118'
+ext['tomcat.version'] = '9.0.121'
 
 group = 'org.dynatrace'
 version = '1.0.1'
