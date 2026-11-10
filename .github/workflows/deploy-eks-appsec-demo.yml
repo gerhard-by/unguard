@@ -35,6 +35,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_malicious_load_generator:
+        description: 'Run the malicious load generator'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   id-token: write
@@ -301,6 +306,7 @@ jobs:
             --set envoyProxy.service.type=LoadBalancer \
             --set ragService.enabled=true \
             --set ollama.enabled=false \
+            --set maliciousLoadGenerator.enabled=${{ inputs.run_malicious_load_generator }} \
             --set profileService.deployment.container.livenessProbe.initialDelaySeconds=120 \
             "${OVERRIDES[@]}" \
             --force-conflicts \
