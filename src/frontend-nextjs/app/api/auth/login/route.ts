@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 import { loginUser } from '@/services/api/AuthService';
 import { isLoggedIn } from '@/services/LocalUserService';
+import { withForwardedClientIp } from '@/lib/clientIpForwarding';
 
 /**
  * @swagger
@@ -13,14 +14,16 @@ import { isLoggedIn } from '@/services/LocalUserService';
  */
 
 export async function POST(request: Request): Promise<NextResponse> {
-    const body = await request.json();
-    const response = await loginUser(body);
+    return withForwardedClientIp(request, async () => {
+        const body = await request.json();
+        const response = await loginUser(body);
 
-    const res = NextResponse.json(response.data, { status: response.status });
+        const res = NextResponse.json(response.data, { status: response.status });
 
-    res.cookies.set('jwt', response.data?.jwt, { path: '/' });
+        res.cookies.set('jwt', response.data?.jwt, { path: '/' });
 
-    return res;
+        return res;
+    });
 }
 
 export async function GET(): Promise<NextResponse<boolean>> {
