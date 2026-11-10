@@ -60,6 +60,7 @@ maliciousLoadGenerator:
         containerPort: 8083
       env:
         FRONTEND_ADDR: unguard-envoy-proxy:8080/ui
+        PROFILE_SERVICE_ADDR: http://unguard-profile-service:80
         USERS: 1
         WAIT_TIME: 1800
 
