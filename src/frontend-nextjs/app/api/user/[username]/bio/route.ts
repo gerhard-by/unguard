@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 import { fetchUserIdForUsername } from '@/services/api/AuthService';
 import { editBio, fetchBio } from '@/services/api/UserService';
+import { withForwardedClientIp } from '@/lib/clientIpForwarding';
 
 /**
  * @swagger
@@ -36,11 +37,13 @@ export async function GET(req: Request, { params }: { params: Promise<UserParams
 }
 
 export async function POST(req: Request, { params }: { params: Promise<UserParams> }): Promise<NextResponse> {
-    const { username } = await params;
-    const userId = await fetchUserIdForUsername(username);
+    return withForwardedClientIp(req, async () => {
+        const { username } = await params;
+        const userId = await fetchUserIdForUsername(username);
 
-    const body = await req.json();
-    const bioResponse = await editBio(userId, body);
+        const body = await req.json();
+        const bioResponse = await editBio(userId, body);
 
-    return NextResponse.json(bioResponse);
+        return NextResponse.json(bioResponse);
+    });
 }

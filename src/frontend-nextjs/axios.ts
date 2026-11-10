@@ -2,11 +2,19 @@ import path from 'path';
 
 import axios from 'axios';
 
+import { applyClientIpForwarding } from '@/lib/clientIpForwarding';
+
 function createAxiosInstance(baseURL: string, headers: Object) {
-    return axios.create({
+    const instance = axios.create({
         baseURL: baseURL,
         headers: headers,
     });
+
+    // Forward the caller's client IP (X-Forwarded-For) to the backend so its
+    // OneAgent attributes traffic to the real source, not the frontend pod.
+    applyClientIpForwarding(instance);
+
+    return instance;
 }
 
 function requireEnv(name: string): string {

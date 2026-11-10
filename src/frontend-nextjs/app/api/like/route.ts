@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { unlikePost } from '@/services/api/LikeService';
+import { withForwardedClientIp } from '@/lib/clientIpForwarding';
 
 /** @swagger
  * /ui/api/like/unlike:
@@ -9,9 +10,11 @@ import { unlikePost } from '@/services/api/LikeService';
  */
 
 export async function DELETE(req: Request): Promise<NextResponse> {
-    const { searchParams } = new URL(req.url);
-    const postId = searchParams.getAll('postId');
-    const res = await unlikePost(postId);
+    return withForwardedClientIp(req, async () => {
+        const { searchParams } = new URL(req.url);
+        const postId = searchParams.getAll('postId');
+        const res = await unlikePost(postId);
 
-    return NextResponse.json(res.data, { status: res.status });
+        return NextResponse.json(res.data, { status: res.status });
+    });
 }
