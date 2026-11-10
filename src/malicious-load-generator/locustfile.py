@@ -232,7 +232,15 @@ class UnguardUser(HttpUser):
         # SQL injection is flagged by the backend's runtime protection under the same
         # IP (actor). That ties the auth bypass to a real security finding.
         attacker = self.get_random_x_forwarded_for_header()
-        exploit_headers = {**attacker, 'User-Agent': 'cve-2026-43512-exploit'}
+        # Use an ordinary browser User-Agent so the bypass does not self-identify in
+        # the access log -- the detection must key on the behaviour (a 200 on
+        # /admin/stats by a non-"admin" principal), not on a tell-tale agent string.
+        exploit_headers = {
+            **attacker,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/125.0.0.0 Safari/537.36',
+        }
 
         self.client.get(
             f"{PROFILE_SERVICE_ADDR}/admin/stats",
