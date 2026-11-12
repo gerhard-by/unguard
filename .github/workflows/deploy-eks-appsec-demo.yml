@@ -297,12 +297,23 @@ jobs:
           # When a deploy restarts every pod at once, its startup (two Java
           # agents plus Hibernate) took 75s+, so the probe killed it into
           # CrashLoopBackOff (run 37796866372). Alone it starts in ~20s.
+          #
+          # dt.github.* labels: these carry the source repository to Dynatrace,
+          # so the "[demo] RVA GitHub Remediation" workflow can resolve which
+          # repo to file an issue against from the affected Kubernetes workload
+          # instead of a hardcoded URL. They are derived from the repository
+          # this run belongs to, so a fork labels its own workloads with no
+          # edit here. labels.common lands on both the workload metadata and
+          # the pod template (chart/templates/_helpers.tpl: renderLabels), and
+          # a label VALUE cannot hold a URL, hence owner and repo separately.
           echo "Deploying variant: ${VARIANT}"
           helm upgrade --install unguard \
             "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
             --version "$CHART_VERSION" \
             --namespace "$K8S_NAMESPACE" \
             --set localDev.enabled=false \
+            --set "labels.common.dt\.github\.owner=${{ github.repository_owner }}" \
+            --set "labels.common.dt\.github\.repository=${{ github.event.repository.name }}" \
             --set envoyProxy.service.type=LoadBalancer \
             --set ragService.enabled=true \
             --set ollama.enabled=false \
