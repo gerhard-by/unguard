@@ -74,8 +74,15 @@ profileService:
       - targetPort: 8080
         port: 80
   deployment:
+    # RollingUpdate, not Recreate: with maxUnavailable 0 the old pod keeps serving
+    # until the new one passes its readinessProbe. Recreate tore the old pod down
+    # first, so every image switch (e.g. vulnerable <-> fixed) meant a hard outage
+    # for the full JVM boot.
     strategy:
-      type: Recreate
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
     container:
       image:
         repository: ghcr.io/dynatrace-oss/unguard/unguard-profile-service
@@ -94,12 +101,43 @@ profileService:
         SPRING_DATASOURCE_PASSWORD: password
         SPRING_DATASOURCE_URL: jdbc:h2:file:./database/bio
         SPRING_DATASOURCE_USERNAME: sa
+      # Without requests this container is scheduled with no CPU guarantee, so on a
+      # busy node the JVM (OneAgent + OTel javaagent + Hibernate) boots far slower
+      # than the probe allows. The memory limit is deliberate: it turns a silent
+      # memory problem into an explicit OOMKilled instead of a bare "Error exit=143".
+      resources:
+        requests:
+          cpu: 500m
+          memory: 768Mi
+        limits:
+          memory: 1536Mi
+      # startupProbe gates BOTH liveness and readiness, so the slow boot gets up to
+      # 24 x 15s = 6 min before anything is allowed to kill or route to it. 6 min
+      # stays inside the deploy workflow's `--wait --timeout 10m`, so a genuinely
+      # broken start fails as "startup probe failed" rather than as a Helm timeout.
+      startupProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        periodSeconds: 15
+        failureThreshold: 24
+      # readinessProbe is what makes RollingUpdate above mean anything: with no
+      # readiness gate a container counts as Ready the moment it is Running, so the
+      # old pod was torn down while the new one was still booting.
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        periodSeconds: 10
+      # initialDelaySeconds 0: the startupProbe already covers the boot window.
       livenessProbe:
         httpGet:
           path: /healthz
           port: 8080
-        initialDelaySeconds: 20
+        initialDelaySeconds: 0
         periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3
 
 # User Simulator
 userSimulator:
@@ -108,6 +146,11 @@ userSimulator:
   cronJob:
     schedule: "*/3 * * * *"
     startingDeadlineSeconds: 180
+    # Forbid + a low backoffLimit stop failed runs from stacking: with Allow and the
+    # default backoffLimit of 6, a new job started every 3 minutes while the previous
+    # ones kept retrying, piling up headless-Chrome pods on the same node.
+    concurrencyPolicy: Forbid
+    backoffLimit: 1
     jobTemplate:
       restartPolicy: OnFailure
 

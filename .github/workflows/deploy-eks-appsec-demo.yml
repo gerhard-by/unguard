@@ -307,10 +307,13 @@ jobs:
           # pods on its node. rag-service stays deployed for AI Observability;
           # its calls fail fast on the missing unguard-ollama host instead.
           #
-          # profile-service's liveness probe defaults to a 20s initial delay.
-          # When a deploy restarts every pod at once, its startup (two Java
-          # agents plus Hibernate) took 75s+, so the probe killed it into
-          # CrashLoopBackOff (run 37796866372). Alone it starts in ~20s.
+          # profile-service's slow boot is now handled in the chart, not here:
+          # a startupProbe (24 x 15s) gates liveness and readiness, the container
+          # has CPU/memory requests so it is not starved while booting, and the
+          # Deployment rolls rather than recreates. The previous
+          # `--set ...livenessProbe.initialDelaySeconds=120` override is gone --
+          # 120s was no longer enough under node contention and it silently
+          # overwrote any live probe patch on every deploy.
           #
           # dt.github.* labels: these carry the source repository to Dynatrace,
           # so the "[demo] RVA GitHub Remediation" workflow can resolve which
@@ -332,7 +335,6 @@ jobs:
             --set ragService.enabled=true \
             --set ollama.enabled=false \
             --set maliciousLoadGenerator.enabled=${{ inputs.run_malicious_load_generator }} \
-            --set profileService.deployment.container.livenessProbe.initialDelaySeconds=120 \
             "${OVERRIDES[@]}" \
             --force-conflicts \
             --wait --timeout 10m
