@@ -75,14 +75,22 @@ profileService:
         port: 80
   deployment:
     # RollingUpdate, not Recreate: with maxUnavailable 0 the old pod keeps serving
-    # until the new one passes its readinessProbe. Recreate tore the old pod down
-    # first, so every image switch (e.g. vulnerable <-> fixed) meant a hard outage
-    # for the full JVM boot.
+    # first, so every image switch (e.g. vulnerable <-> fixed) meant a hard outage.
+    #
+    # maxSurge 0 / maxUnavailable 1, NOT maxSurge 1: this is a single-replica
+    # deployment on ~2-vCPU nodes that already run at their CPU-request ceiling.
+    # maxSurge 1 brings up the new pod BEFORE terminating the old, so two pods
+    # each requesting 500m CPU must fit at once -- which no node can satisfy, so
+    # the new pod sticks Pending, `helm upgrade --wait` hangs, and the release is
+    # left in pending-upgrade (observed: run 43930269656 / rev 51). maxUnavailable 1
+    # terminates the old pod first, freeing its request, then schedules the new one
+    # in the freed space. The readinessProbe still gates routing, so the only cost
+    # is the boot gap -- acceptable, and far better than a stuck rollout.
     strategy:
       type: RollingUpdate
       rollingUpdate:
-        maxUnavailable: 0
-        maxSurge: 1
+        maxUnavailable: 1
+        maxSurge: 0
     container:
       image:
         repository: ghcr.io/dynatrace-oss/unguard/unguard-profile-service
@@ -107,7 +115,10 @@ profileService:
       # memory problem into an explicit OOMKilled instead of a bare "Error exit=143".
       resources:
         requests:
-          cpu: 500m
+          # 250m, not 500m: 500m is a quarter of a ~2-vCPU node reserved for one
+          # service, which on these saturated nodes left no room to schedule. 250m
+          # still gives the boot a real CPU floor without blocking placement.
+          cpu: 250m
           memory: 768Mi
         limits:
           memory: 1536Mi
