@@ -44,6 +44,10 @@ spec:
       app.kubernetes.io/part-of: unguard
   strategy:
     type: {{ .Values.profileService.deployment.strategy.type }}
+    {{- if and (eq .Values.profileService.deployment.strategy.type "RollingUpdate") .Values.profileService.deployment.strategy.rollingUpdate }}
+    rollingUpdate:
+{{ .Values.profileService.deployment.strategy.rollingUpdate | toYaml | indent 6 }}
+    {{- end }}
   template:
     metadata:
       labels:
@@ -57,12 +61,30 @@ spec:
           imagePullPolicy: {{ .Values.profileService.deployment.container.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.profileService.deployment.container.ports.containerPort }}
+          {{- with .Values.profileService.deployment.container.resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with .Values.profileService.deployment.container.startupProbe }}
+          startupProbe:
+{{ toYaml . | indent 12 }}
+          {{- end }}
+          {{- with .Values.profileService.deployment.container.readinessProbe }}
+          readinessProbe:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.profileService.deployment.container.livenessProbe.httpGet.path }}
               port: {{ .Values.profileService.deployment.container.livenessProbe.httpGet.port }}
             initialDelaySeconds: {{ .Values.profileService.deployment.container.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.profileService.deployment.container.livenessProbe.periodSeconds }}
+            {{- with .Values.profileService.deployment.container.livenessProbe.timeoutSeconds }}
+            timeoutSeconds: {{ . }}
+            {{- end }}
+            {{- with .Values.profileService.deployment.container.livenessProbe.failureThreshold }}
+            failureThreshold: {{ . }}
+            {{- end }}
           env:
             - name: SPRING_DATASOURCE_URL
               value: {{ quote .Values.profileService.deployment.container.env.SPRING_DATASOURCE_URL }}

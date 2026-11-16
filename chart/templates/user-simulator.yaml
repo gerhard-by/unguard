@@ -25,8 +25,14 @@ metadata:
 spec:
   schedule: {{ quote .Values.userSimulator.cronJob.schedule }}
   startingDeadlineSeconds: {{ .Values.userSimulator.cronJob.startingDeadlineSeconds }}
+  {{- with .Values.userSimulator.cronJob.concurrencyPolicy }}
+  concurrencyPolicy: {{ . }}
+  {{- end }}
   jobTemplate:
     spec:
+      {{- with .Values.userSimulator.cronJob.backoffLimit }}
+      backoffLimit: {{ . }}
+      {{- end }}
       template:
         metadata:
           labels:
