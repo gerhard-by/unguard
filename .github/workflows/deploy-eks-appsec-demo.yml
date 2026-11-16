@@ -54,6 +54,9 @@ env:
   # 11.0.22 in the four Spring services, and published by release.yaml under
   # the appsec-demo/ namespace. Cluster nodes pull these with their own
   # instance profile -- the deploy role needs no ECR access.
+  # NOTE: the "fixed" variant deploys only the profile-service fix image, even
+  # though PR #8 pinned all four. That is deliberate -- see the long comment on
+  # the image-override loop in the Helm step for why (negative-case finding).
   ECR_REGISTRY: 124381674733.dkr.ecr.us-east-1.amazonaws.com
   IMAGE_NAMESPACE: appsec-demo
   # IAM role assumed via OIDC. Not a secret -- an OIDC role is secured by its
@@ -161,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           # The chart is always the latest published build (or the vulnerable
-          # override); "fixed" only swaps four service images on top of it.
+          # override); "fixed" only swaps the profile-service image on top of it.
           if [ "$VARIANT" = "vulnerable" ] && [ -n "$VULN_OVERRIDE" ]; then
             CHART_VERSION="$VULN_OVERRIDE"
           else
@@ -250,8 +253,21 @@ jobs:
         run: |
           set -euo pipefail
           # "vulnerable" deploys the chart exactly as published. "fixed" swaps
-          # only the four services PR #8 patched; every other service is byte
-          # identical between the variants.
+          # ONLY profile-service to the PR #8 fix image; every other service --
+          # including the other Spring services that embed the same vulnerable
+          # Tomcat (microblog-service, proxy-service) -- stays on the published
+          # vulnerable tag and is byte identical between the variants.
+          #
+          # This is deliberate, and it is what makes the negative-case beat
+          # work. profile-service is the only service that calls the vulnerable
+          # RealmBase#getDigest (it has the DIGEST /admin realm), so S-601 is
+          # IN_USE there and NOT_IN_USE on the other Spring services. Patching
+          # only profile-service resolves the in-use/exposed finding while the
+          # NOT_IN_USE carriers keep the CVE open -- so the vulnerability does
+          # not collapse to "fixed", and the RVA workflow has a live finding to
+          # dismiss (function not in use) instead of dispatching a fix for.
+          # Rolling out fewer workloads than PR #8 pinned is fine: the fix is a
+          # deploy-time image choice, independent of what the build pinned.
           #
           # These overrides are intentionally NOT combined with --reuse-values:
           # restating the full desired state each run is what lets a deploy
@@ -259,9 +275,7 @@ jobs:
           OVERRIDES=()
           if [ "$VARIANT" = "fixed" ]; then
             REPO_PREFIX="${ECR_REGISTRY}/${IMAGE_NAMESPACE}"
-            for svc in profileService:profile-service proxyService:proxy-service \
-                       microblogService:microblog-service \
-                       feedbackIngestionService:feedback-ingestion-service; do
+            for svc in profileService:profile-service; do
               key="${svc%%:*}"
               image="unguard-${svc#*:}"
               OVERRIDES+=(
