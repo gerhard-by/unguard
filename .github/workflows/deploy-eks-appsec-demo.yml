@@ -54,9 +54,11 @@ env:
   # 11.0.22 in the four Spring services, and published by release.yaml under
   # the appsec-demo/ namespace. Cluster nodes pull these with their own
   # instance profile -- the deploy role needs no ECR access.
-  # NOTE: the "fixed" variant deploys only the profile-service fix image, even
-  # though PR #8 pinned all four. That is deliberate -- see the long comment on
-  # the image-override loop in the Helm step for why (negative-case finding).
+  # NOTE: the "fixed" variant deploys the profile-service AND proxy-service fix
+  # images, though PR #8 pinned all four. That is deliberate -- see the long
+  # comment on the image-override loop in the Helm step for why (these are the
+  # two appsec-demo entities Davis assesses as internet-exposed, so they are the
+  # two that drive the Security Score).
   ECR_REGISTRY: 124381674733.dkr.ecr.us-east-1.amazonaws.com
   IMAGE_NAMESPACE: appsec-demo
   # IAM role assumed via OIDC. Not a secret -- an OIDC role is secured by its
@@ -253,21 +255,33 @@ jobs:
         run: |
           set -euo pipefail
           # "vulnerable" deploys the chart exactly as published. "fixed" swaps
-          # ONLY profile-service to the PR #8 fix image; every other service --
-          # including the other Spring services that embed the same vulnerable
-          # Tomcat (microblog-service, proxy-service) -- stays on the published
+          # profile-service AND proxy-service to the PR #8 fix image; every other
+          # service -- including microblog-service and feedback-ingestion-service,
+          # which embed the same vulnerable Tomcat -- stays on the published
           # vulnerable tag and is byte identical between the variants.
           #
-          # This is deliberate, and it is what makes the negative-case beat
-          # work. profile-service is the only service that calls the vulnerable
-          # RealmBase#getDigest (it has the DIGEST /admin realm), so S-601 is
-          # IN_USE there and NOT_IN_USE on the other Spring services. Patching
-          # only profile-service resolves the in-use/exposed finding while the
-          # NOT_IN_USE carriers keep the CVE open -- so the vulnerability does
-          # not collapse to "fixed", and the RVA workflow has a live finding to
-          # dismiss (function not in use) instead of dispatching a fix for.
-          # Rolling out fewer workloads than PR #8 pinned is fine: the fix is a
-          # deploy-time image choice, independent of what the build pinned.
+          # Why these two and not just profile-service: the demo claim is that
+          # the Davis Security Score falls after the fix, and that score is
+          # driven by Davis's internet-exposure assessment, NOT by the in-use
+          # function. Measured live on the tenant, both appsec-demo entities that
+          # are PUBLIC_NETWORK score 8.6 -- profile-service (PUBLIC + IN_USE) and
+          # proxy-service (PUBLIC + NOT_IN_USE) alike -- while the ADJACENT
+          # carriers score 7.6. So patching profile-service ALONE leaves
+          # proxy-service PUBLIC at 8.6 and the overall score does not move.
+          # Patching both PUBLIC entities drops the score to 7.6 (the remaining
+          # ADJACENT carriers), which is the visible fall the demo needs.
+          #
+          # proxy-service is PUBLIC because the frontend's /api/post handler
+          # fetches a post's URL through it (CreatePostService -> getProxy), and
+          # that call carries the simulator's forwarded public X-Forwarded-For;
+          # profile-service is PUBLIC via the bio/membership frontend sinks.
+          #
+          # The CVE still does not collapse to "fixed": the unguard-namespace
+          # profile/proxy and appsec-demo feedback-ingestion stay OPEN (this
+          # workflow only touches appsec-demo), so the RVA workflow still has
+          # live NOT_IN_USE carriers. Rolling out fewer workloads than PR #8
+          # pinned is fine: the fix is a deploy-time image choice, independent of
+          # what the build pinned.
           #
           # These overrides are intentionally NOT combined with --reuse-values:
           # restating the full desired state each run is what lets a deploy
@@ -275,7 +289,7 @@ jobs:
           OVERRIDES=()
           if [ "$VARIANT" = "fixed" ]; then
             REPO_PREFIX="${ECR_REGISTRY}/${IMAGE_NAMESPACE}"
-            for svc in profileService:profile-service; do
+            for svc in profileService:profile-service proxyService:proxy-service; do
               key="${svc%%:*}"
               image="unguard-${svc#*:}"
               OVERRIDES+=(
