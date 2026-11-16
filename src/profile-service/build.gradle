@@ -4,6 +4,8 @@ plugins {
     id 'java'
 }
 
+ext['tomcat.version'] = '9.0.118'
+
 group = 'org.dynatrace'
 version = '0.0.1-SNAPSHOT'
 sourceCompatibility = "11"

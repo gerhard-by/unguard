@@ -5,6 +5,8 @@ plugins {
     id 'com.google.cloud.tools.jib' version '3.4.4'
 }
 
+ext['tomcat.version'] = '11.0.22'
+
 group = 'org.dynatrace'
 version = '0.0.1-SNAPSHOT'
 description = 'feedback-ingestion-service'
