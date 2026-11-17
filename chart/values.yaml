@@ -115,10 +115,12 @@ profileService:
       # memory problem into an explicit OOMKilled instead of a bare "Error exit=143".
       resources:
         requests:
-          # 250m, not 500m: 500m is a quarter of a ~2-vCPU node reserved for one
-          # service, which on these saturated nodes left no room to schedule. 250m
-          # still gives the boot a real CPU floor without blocking placement.
-          cpu: 250m
+          # 500m guarantees the slow boot (two Java agents + Hibernate) a real CPU
+          # floor so it reaches library-load fast -- which is what RVA scans. The
+          # nodes are now m5.xlarge (4 vCPU, sustained, not the old 2-vCPU t2), so
+          # there is ample room for this request; the earlier 250m was a workaround
+          # for saturated t2 nodes and only starved the boot.
+          cpu: 500m
           memory: 768Mi
         limits:
           memory: 1536Mi
