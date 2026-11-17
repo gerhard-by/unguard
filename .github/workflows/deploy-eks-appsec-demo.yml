@@ -337,6 +337,15 @@ jobs:
           # edit here. labels.common lands on both the workload metadata and
           # the pod template (chart/templates/_helpers.tpl: renderLabels), and
           # a label VALUE cannot hold a URL, hence owner and repo separately.
+          # No --wait: the goal is "button -> the new image is applied so OneAgent
+          # can scan it", not "wait for every pod to be Ready". helm creates the
+          # new ReplicaSet the moment it applies, so the changed process starts
+          # (and RVA can pick up the new/removed vulnerability) regardless of when
+          # the rollout finishes -- which we do not care about here. Dropping --wait
+          # also removes the failure modes that blocked us repeatedly: a slow boot
+          # no longer hangs the job to its timeout and leaves the release stuck in
+          # pending-upgrade/failed. Rollout health is verified out of band (RVA, and
+          # the diagnostics steps below), not by gating this step on readiness.
           echo "Deploying variant: ${VARIANT}"
           helm upgrade --install unguard \
             "oci://ghcr.io/${CHART_NAMESPACE}/unguard" \
@@ -350,8 +359,7 @@ jobs:
             --set ollama.enabled=false \
             --set maliciousLoadGenerator.enabled=${{ inputs.run_malicious_load_generator }} \
             "${OVERRIDES[@]}" \
-            --force-conflicts \
-            --wait --timeout 10m
+            --force-conflicts
 
       - name: Report deployed images
         env:
