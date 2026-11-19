@@ -8,6 +8,7 @@ plugins {
 
 group = 'org.dynatrace'
 version = '1.0.1'
+ext['tomcat.version'] = '9.0.118'
 sourceCompatibility = '1.8'
 
 repositories {
