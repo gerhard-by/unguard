@@ -81,6 +81,12 @@ LOCATION_BASED_IPS = ['177.236.37.155',
                       '62.179.239.135',
                       '113.167.100.35']
 
+# The digest-auth bypass always originates from one fixed attacker IP, so the
+# exploitation attempt and its paired SQL injection correlate to a single actor
+# in the investigation. The other exploits rotate through LOCATION_BASED_IPS;
+# only the digest bypass and its follow-through use this pinned source.
+DIGEST_ATTACKER_IP = '102.46.70.77'
+
 USER_INDEX = 0
 
 JNDI_URIS = [
@@ -231,7 +237,7 @@ class UnguardUser(HttpUser):
         # the bypass shows up in profile-service's access log under this IP, while the
         # SQL injection is flagged by the backend's runtime protection under the same
         # IP (actor). That ties the auth bypass to a real security finding.
-        attacker = self.get_random_x_forwarded_for_header()
+        attacker = {'x-forwarded-for': DIGEST_ATTACKER_IP}
         # Use an ordinary browser User-Agent so the bypass does not self-identify in
         # the access log -- the detection must key on the behaviour (a 200 on
         # /admin/stats by a non-"admin" principal), not on a tell-tale agent string.
